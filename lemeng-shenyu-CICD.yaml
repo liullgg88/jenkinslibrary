@@ -1,0 +1,125 @@
+pipeline {
+    agent { label 'jenkins-agent'}
+    environment {
+        PATH = "PATH+EXTRA=/usr/sbin:/usr/bin:/sbin:/bin"
+        JAVA_HOME = "/opt/java/openjdk"
+        APP_NAME="apache-shenyu-2.6.0-bootstrap-bin"
+        RESOURCE_NAME="lemon/my-shenyu-bootstrap"
+        DOCKER_REGISTRY="swr.cn-east-3.myhuaweicloud.com/hwy-test/my-shenyu-bootstrap-test"
+        // VERSION="2.6.0-202312262042"
+        docker_command="/usr/local/bin/docker"
+        JOB_NAME="shenyu"
+    }
+    stages {
+        // stage('Hello') {
+        //     steps {
+        //         container("jnlp"){
+        //             echo 'Hello World'
+        //         }
+        //     }
+        // }
+        stage('拉取代码') {
+            steps {
+                container("jnlp"){
+                    script{
+                        checkout scmGit(branches: [[name: '*/dashboard_2.6.0_update']], extensions: [], userRemoteConfigs: [[credentialsId: 'shenyu-gitlab-user', url: 'https://gitlab.nhsoft.cn/earth1/shenyu.git']])
+                        echo "代码拉取完成"
+                    }
+                }    
+            }
+        }
+        stage('并行执行的 Stage') {
+            parallel {
+                stage('构建编译') {
+                    steps {
+                        container("jnlp"){
+                            script{
+                                container("jnlp"){
+                                    echo "开始构建"
+                                    sh " rm -rf /opt/java/openjdk && mv /usr/local/java  /opt/java/openjdk"
+                                    sh "/opt/java/openjdk/bin/java -version && cd $Workspace && /usr/bin/mvn clean -T 10 package -DskipTests"
+                                }
+                            }
+                        }
+                    }
+                }
+                stage('代码检查') {
+                    steps {
+                      script{
+                        //   调用代码检测
+                            CodeCheckPipeline (ak: 'EUWCTMRJSEMOPXMQBYCQ', project_id: '8672d4f0470f4eaf8bd75e2589934d21 (乐檬)', region: 'cn-east-3', sk: '3gPhrII9WTDX1utNevxkNgbzj09SypiI7MEkS9re', task_id: '68359ea670724a1a97a0181a0dcacec1', topicUrn: '',deleteTask:"false")
+                        //   调用华为流水线
+                        //   CodeArtsPipeline(ak: 'EUWCTMRJSEMOPXMQBYCQ', pipeline_id: 'bab34c1352594474aaace38c36c0ad83', project_id: '8672d4f0470f4eaf8bd75e2589934d21', region: 'cn-east-3', sk: '3gPhrII9WTDX1utNevxkNgbzj09SypiI7MEkS9re',topicUrn: '')
+                          echo "代码检查质完成！"
+                          } 
+                      }
+                }
+            }
+        }
+        
+
+        // stage('代码检查') {
+        //     steps {
+        //       script{
+        //         //   调用代码检测
+        //             // CodeCheckPipeline (ak: 'EUWCTMRJSEMOPXMQBYCQ', project_id: '8672d4f0470f4eaf8bd75e2589934d21 (乐檬)', region: 'cn-east-3', sk: '3gPhrII9WTDX1utNevxkNgbzj09SypiI7MEkS9re', task_id: '68359ea670724a1a97a0181a0dcacec1', topicUrn: '',deleteTask:"false")
+        //         //   调用华为流水线
+        //         //   CodeArtsPipeline(ak: 'EUWCTMRJSEMOPXMQBYCQ', pipeline_id: 'bab34c1352594474aaace38c36c0ad83', project_id: '8672d4f0470f4eaf8bd75e2589934d21', region: 'cn-east-3', sk: '3gPhrII9WTDX1utNevxkNgbzj09SypiI7MEkS9re',topicUrn: '')
+        //           echo "代码检查质完成！"
+        //           } 
+        //       }
+        //     }
+            
+        stage('镜像构建') {
+            steps {
+                container("docker"){
+                    script {
+                        echo '开始构建镜像'
+                        def currentDate = sh (script: 'date +%Y%m%d%H%M%S', returnStdout: true).trim()
+                        VERSION="2.6.0-${currentDate}"
+                        sh """
+                        $docker_command  login -u cn-east-3@EUWCTMRJSEMOPXMQBYCQ -p 27de8d5bf3b11afedd564d9ca018f84c5985adfdb86642eff8a5515fea934d7e swr.cn-east-3.myhuaweicloud.com
+                        cd $Workspace/shenyu-dist/shenyu-bootstrap-dist && $docker_command build  -t ${RESOURCE_NAME}:${VERSION} --build-arg APP_NAME=${APP_NAME} -f docker/Dockerfile . 
+                        $docker_command tag ${RESOURCE_NAME}:${VERSION} ${DOCKER_REGISTRY}:${VERSION} 
+                        $docker_command push ${DOCKER_REGISTRY}:${VERSION} 
+                        $docker_command rmi ${RESOURCE_NAME}:${VERSION} 
+                        $docker_command rmi ${DOCKER_REGISTRY}:${VERSION} 
+                        echo "delete image success"
+                        """
+                        }
+                    }
+                }
+            }
+        // 部署,对接argo CD
+        stage('Deploy') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'lemon_hwy-hwy.lll', passwordVariable: 'DEPLOY_PASSWORD', usernameVariable: 'DEPLOY_USER')]){
+                    container('jnlp') {
+                        script{
+                            APP_DIR="${JOB_NAME}".split("_")[0]
+                            sh """
+                            /usr/bin/git config --global user.name "Administrator"
+                            /usr/bin/git config --global user.email "coolops@163.com"
+                            cd  /home/jenkins/
+                            /usr/bin/git clone https://lemon_hwy%2Fhwy.lll:liullgg88@codehub.devcloud.cn-east-3.huaweicloud.com/lm_hwy.lll00001/examples.git
+                            cd  /home/jenkins/examples
+                            /usr/bin/git pull
+                            cd /home/jenkins/examples/${APP_DIR}
+                            /usr/local/bin/kustomize edit set image ${DOCKER_REGISTRY}:${VERSION}
+                            /usr/bin/git commit -am 'image update'
+                            /usr/bin/git push origin main
+                            """
+                        }
+                    }
+                }
+            }
+        }
+        // 接口测试
+        stage('接口测试') {
+            steps{
+                sh 'echo "接口测试"'
+            }
+        }
+    }
+        
+}
